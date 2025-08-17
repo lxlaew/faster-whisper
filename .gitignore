@@ -13,3 +13,20 @@ venv/
 # Ignore IDE, Editor Files
 .idea/
 .vscode/
+
+small
+medium
+large-v3
+
+benchmark
+docker
+faster_whisper
+tests
+venv_faster_whisper
+
+cublas64_12.dll
+cublasLt64_12.dll
+cudnn_cnn_infer64_8.dll
+cudnn_ops_infer64_8.dll
+cudnn_ops64_9.dll
+cudnn64_9.dll
