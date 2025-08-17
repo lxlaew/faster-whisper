@@ -1,10 +1,24 @@
+from fastapi import FastAPI, Query, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from faster_whisper import WhisperModel
 import time
 import os
+import json
+import asyncio
+from typing import Optional, AsyncGenerator
+import tempfile
+import uvicorn
+from pathlib import Path
+
+
+app = FastAPI(title="语音转录服务", description="基于 faster-whisper 的实时语音转录 API")
+
+# 全局模型缓存
+_model_cache = {}
 
 
 def get_file_type(file_path):
-    # 获取文件扩展名
+    """获取文件类型"""
     file_ext = os.path.splitext(file_path)[1].lower()
     
     # 音频格式
@@ -20,28 +34,30 @@ def get_file_type(file_path):
         return 'unknown'
 
 
-def transcribe_media(media_path, 
-                    model_size="medium", 
-                    device="cuda", 
-                    compute_type="float16", 
-                    beam_size=5, 
-                    language="zh", 
-                    print_results=True):
-    """
-    转录音频或视频文件为文字
+def get_model(model_size="medium", device="cuda", compute_type="float16"):
+    """获取或创建模型实例（带缓存）"""
+    cache_key = f"{model_size}_{device}_{compute_type}"
     
-    Args:
-        media_path (str): 音频或视频文件路径
-        model_size (str): 模型大小 ("small", "medium", "large-v3")
-        device (str): 运行设备 ("cuda", "cpu")
-        compute_type (str): 计算类型 ("float16", "int8_float16", "int8")
-        beam_size (int): 集束搜索大小
-        language (str): 指定语言代码
-        print_results (bool): 是否打印结果
+    if cache_key not in _model_cache:
+        print(f"🔧 正在加载 {model_size} 模型...")
+        _model_cache[cache_key] = WhisperModel(
+            model_size, device=device, compute_type=compute_type
+        )
+        print(f"✅ 模型 {model_size} 加载完成")
     
-    Returns:
-        tuple: (segments, info, elapsed_time, file_type)
-    """
+    return _model_cache[cache_key]
+
+
+async def transcribe_media_stream(
+    media_path: str,
+    model_size: str = "medium",
+    device: str = "cuda", 
+    compute_type: str = "float16",
+    beam_size: int = 5,
+    language: str = "zh"
+) -> AsyncGenerator[str, None]:
+    """流式转录媒体文件，实时返回结果"""
+    
     # 检查文件是否存在
     if not os.path.exists(media_path):
         raise FileNotFoundError(f"媒体文件不存在: {media_path}")
@@ -49,86 +65,162 @@ def transcribe_media(media_path,
     # 检测文件类型
     file_type = get_file_type(media_path)
     
-    if print_results:
-        if file_type == 'audio':
-            print(f"🎵 检测到音频文件: {os.path.basename(media_path)}")
-        elif file_type == 'video':
-            print(f"🎬 检测到视频文件: {os.path.basename(media_path)}")
-            print("ℹ️  将从视频中提取音频进行转录...")
-        else:
-            print(f"⚠️  未知文件格式: {os.path.basename(media_path)}")
-            print("ℹ️  尝试作为媒体文件处理...")
-    
-    # 初始化模型
-    if print_results:
-        print(f"🔧 正在加载 {model_size} 模型...")
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    
-    # 记录开始时间
-    start_time = time.time()
-    
-    # 转录媒体文件（faster-whisper 会自动处理视频文件的音频提取）
-    segments, info = model.transcribe(media_path, beam_size=beam_size, language=language)
-    
-    if print_results:
-        print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
-        print("开始转录...\n")
-    
-    # 实时处理和打印每个音频段
-    segments_list = []
-    segment_count = 0
-    
-    for segment in segments:
-        segments_list.append(segment)
-        segment_count += 1
-        
-        if print_results:
-            print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
-            # 可选：显示进度
-            # print(f"  -> 已处理 {segment_count} 段")
-    
-    # 记录结束时间并计算总耗时
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    
-    if print_results:
-        # 计算分钟和秒数
-        minutes = int(elapsed_time // 60)
-        seconds = int(elapsed_time % 60)
-        file_type_emoji = "🎵" if file_type == 'audio' else "🎬" if file_type == 'video' else "📁"
-        print(f"\n{file_type_emoji} 转录完成！共处理了 {segment_count} 个音频段")
-        print(f"⏱️ 总耗时: {minutes}分钟{seconds}秒")
-    
-    return segments_list, info, elapsed_time, file_type
-
-
-def main():
-    """主函数"""
-    # 支持音频和视频文件
-    # media_file = "audio.mp3"
-    # media_file = "D:/myproject/douyin_live_stream/xihuji/xihuji.mp3"
-
-    # 视频文件示例
-    media_file = "video.mp4"
-    # media_file = "D:/myproject/douyin_live_stream/xihuji/xihuji.mp4"
-
+    # 发送开始信息
+    start_info = {
+        "type": "start",
+        "file_name": os.path.basename(media_path),
+        "file_type": file_type,
+        "timestamp": time.time()
+    }
+    yield f"data: {json.dumps(start_info, ensure_ascii=False)}\n\n"
     
     try:
-        segments, info, elapsed_time, file_type = transcribe_media(
-            media_path=media_file,
-            model_size="medium",  # 可选: "small", "medium", "large-v3"
-            device="cuda",        # 可选: "cuda", "cpu"
-            compute_type="float16",  # 可选: "float16", "int8_float16", "int8"
-            beam_size=5,
-            language="zh",
-            print_results=True
-        )
+        # 获取模型
+        model = get_model(model_size, device, compute_type)
         
-        print(f"\n✅ 成功处理 {file_type} 文件")
+        # 记录开始时间
+        start_time = time.time()
+        
+        # 转录媒体文件
+        segments, info = model.transcribe(media_path, beam_size=beam_size, language=language)
+        
+        # 发送语言检测信息
+        lang_info = {
+            "type": "language_detected",
+            "language": info.language,
+            "language_probability": float(info.language_probability),
+            "timestamp": time.time()
+        }
+        yield f"data: {json.dumps(lang_info, ensure_ascii=False)}\n\n"
+        
+        # 实时处理每个音频段
+        segment_count = 0
+        
+        for segment in segments:
+            segment_count += 1
+            
+            # 发送转录段结果
+            segment_data = {
+                "type": "segment",
+                "segment_id": segment_count,
+                "start_time": float(segment.start),
+                "end_time": float(segment.end),
+                "text": segment.text,
+                "timestamp": time.time()
+            }
+            yield f"data: {json.dumps(segment_data, ensure_ascii=False)}\n\n"
+            
+            # 让出控制权，允许其他任务执行
+            await asyncio.sleep(0.01)
+        
+        # 计算总耗时
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        
+        # 发送完成信息
+        complete_info = {
+            "type": "complete",
+            "total_segments": segment_count,
+            "elapsed_time": elapsed_time,
+            "file_type": file_type,
+            "timestamp": time.time()
+        }
+        yield f"data: {json.dumps(complete_info, ensure_ascii=False)}\n\n"
         
     except Exception as e:
-        print(f"❌ 转录过程中发生错误: {e}")
+        # 发送错误信息
+        error_info = {
+            "type": "error",
+            "error_message": str(e),
+            "timestamp": time.time()
+        }
+        yield f"data: {json.dumps(error_info, ensure_ascii=False)}\n\n"
+
+
+@app.get("/")
+async def root():
+    """API 根目录"""
+    return {"message": "🎵 语音转录服务运行中", "version": "1.0.0"}
+
+
+@app.get("/asr")
+async def transcribe_by_path(
+    media_path: str = Query(..., description="媒体文件的完整路径"),
+    model_size: str = Query("medium", description="模型大小 (small/medium/large-v3)"),
+    device: str = Query("cuda", description="设备类型 (cuda/cpu)"),
+    compute_type: str = Query("float16", description="计算类型 (float16/int8_float16/int8)"),
+    beam_size: int = Query(5, description="集束搜索大小"),
+    language: str = Query("zh", description="语言代码")
+):
+    """通过文件路径进行语音转录 (Server-Sent Events)"""
+    
+    return StreamingResponse(
+        transcribe_media_stream(
+            media_path=media_path,
+            model_size=model_size,
+            device=device,
+            compute_type=compute_type,
+            beam_size=beam_size,
+            language=language
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+# 【预留方案】直接上传文件到服务端，进行转录
+@app.post("/asr/upload")
+async def transcribe_by_upload(
+    file: UploadFile = File(...),
+    model_size: str = Query("medium", description="模型大小"),
+    device: str = Query("cuda", description="设备类型"),
+    compute_type: str = Query("float16", description="计算类型"),
+    beam_size: int = Query(5, description="集束搜索大小"),
+    language: str = Query("zh", description="语言代码")
+):
+    """通过文件上传进行语音转录 (Server-Sent Events)"""
+    
+    # 保存上传的文件到临时目录
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+        content = await file.read()
+        tmp_file.write(content)
+        temp_path = tmp_file.name
+    
+    try:
+        return StreamingResponse(
+            transcribe_media_stream(
+                media_path=temp_path,
+                model_size=model_size,
+                device=device,
+                compute_type=compute_type,
+                beam_size=beam_size,
+                language=language
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+    finally:
+        # 清理临时文件
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    main()
+    print("🚀 启动语音转录服务...")
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        log_level="info"
+    )

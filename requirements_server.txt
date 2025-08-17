@@ -1,0 +1,8 @@
+# 服务端依赖
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+# faster-whisper>=0.10.0
+python-multipart>=0.0.6
+
+# 客户端依赖（如果需要单独安装）
+requests>=2.31.0
