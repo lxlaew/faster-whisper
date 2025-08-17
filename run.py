@@ -224,3 +224,7 @@ if __name__ == "__main__":
         port=8000,
         log_level="info"
     )
+
+
+# 指令示例：
+# .\venv_faster_whisper\Scripts\python .\run.py

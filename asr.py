@@ -164,7 +164,7 @@ class ASRClient:
         
         if event_type == 'start':
             file_type_emoji = "🎵" if data.get('file_type') == 'audio' else "🎬"
-            print(f"{file_type_emoji} 开始处理: {data.get('file_name')}")
+            print(f"开始处理: {data.get('file_name')}")
             print()
             
         elif event_type == 'language_detected':
@@ -278,3 +278,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# 指令示例：
+# .\venv_faster_whisper\Scripts\python .\asr.py video.mp4
